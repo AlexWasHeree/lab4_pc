@@ -52,7 +52,7 @@ func main() {
 		sums[_sum] = append(sums[_sum], path)
 	}
 
-	fmt.Println(totalSum)
+	fmt.Println("Non concurrent: ", totalSum)
 
 	for sum, files := range sums {
 		if len(files) > 1 {
