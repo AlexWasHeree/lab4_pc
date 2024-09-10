@@ -7,18 +7,20 @@ import (
 	"sync"
 )
 
-func readFile(filePath string) ([]byte, error) {
+func readFile(filePath string, wg *sync.WaitGroup, dataCh chan<- map[string][]byte) {
+	defer wg.Done()
+
 	data, err := ioutil.ReadFile(filePath)
 	if err != nil {
 		fmt.Printf("Error reading file %s: %v\n", filePath, err)
-		return nil, err
+		return
 	}
-	return data, nil
+
+	dataCh <- map[string][]byte{filePath: data}
 }
 
 func chunkFile(data []byte, chunkSize int) []int {
 	var chunks []int
-
 	for i := 0; i < len(data); i += chunkSize {
 		end := i + chunkSize
 		if end > len(data) {
@@ -33,8 +35,13 @@ func chunkFile(data []byte, chunkSize int) []int {
 
 		chunks = append(chunks, chunkSum)
 	}
-
 	return chunks
+}
+
+func processFile(filePath string, data []byte, chunkSize int, wg *sync.WaitGroup, chunkCh chan<- map[string][]int) {
+	defer wg.Done()
+	chunks := chunkFile(data, chunkSize)
+	chunkCh <- map[string][]int{filePath: chunks}
 }
 
 func compareChunks(chunks1, chunks2 []int) float64 {
@@ -55,63 +62,46 @@ func compareChunks(chunks1, chunks2 []int) float64 {
 }
 
 func calculateSimilarities(filePaths []string, chunkSize int) {
-	chunkedFiles := make(map[string][]int)
-	var mu sync.Mutex
-
+	dataCh := make(chan map[string][]byte, len(filePaths))
+	chunkCh := make(chan map[string][]int, len(filePaths))
 	var wg sync.WaitGroup
-
-	results := make(chan string, len(filePaths)*(len(filePaths)-1)/2)
 
 	for _, path := range filePaths {
 		wg.Add(1)
-		go func(filePath string) {
-			defer wg.Done()
-			data, err := readFile(filePath)
-			if err != nil {
-				fmt.Printf("Skipping file %s due to error: %v\n", filePath, err)
-				return
-			}
-
-			chunks := chunkFile(data, chunkSize)
-
-			mu.Lock()
-			chunkedFiles[filePath] = chunks
-			mu.Unlock()
-		}(path)
+		go readFile(path, &wg, dataCh)
 	}
 
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(dataCh)
+	}()
+
+	go func() {
+		for fileData := range dataCh {
+			for path, data := range fileData {
+				wg.Add(1)
+				go processFile(path, data, chunkSize, &wg, chunkCh)
+			}
+		}
+		wg.Wait()
+		close(chunkCh)
+	}()
+
+	chunkedFiles := make(map[string][]int)
+	for chunkData := range chunkCh {
+		for path, chunks := range chunkData {
+			chunkedFiles[path] = chunks
+		}
+	}
 
 	for i := 0; i < len(filePaths); i++ {
 		file1 := filePaths[i]
 		for j := i + 1; j < len(filePaths); j++ {
 			file2 := filePaths[j]
+			similarity := compareChunks(chunkedFiles[file1], chunkedFiles[file2])
 
-			wg.Add(1)
-			go func(file1, file2 string) {
-				defer wg.Done()
-
-				mu.Lock()
-				chunks1 := chunkedFiles[file1]
-				chunks2 := chunkedFiles[file2]
-				mu.Unlock()
-
-				
-				similarity := compareChunks(chunks1, chunks2)
-
-				
-				results <- fmt.Sprintf("Similarity between %s and %s: %.6f%%", file1, file2, similarity*100)
-			}(file1, file2)
+			fmt.Printf("Similarity between %s and %s: %.6f%%\n", file1, file2, similarity*100)
 		}
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	for result := range results {
-		fmt.Println(result)
 	}
 }
 
@@ -123,5 +113,6 @@ func main() {
 
 	filePaths := os.Args[1:]
 	chunkSize := 1024
+
 	calculateSimilarities(filePaths, chunkSize)
 }
